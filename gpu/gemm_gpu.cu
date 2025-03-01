@@ -1,7 +1,11 @@
 #include "../include/utils.h"
 #include <cuda_runtime.h>
+#include <cublas_v2.h>
 
 #define NUM_RUNS 10
+#define BLOCK_SIZE 16
+#define TILE_SIZE 32
+#define TILE_SIZE_BEST 16
 
 #define CUDA_CHECK(func)                                                     	   \
 	do {                                                                           \
@@ -104,26 +108,145 @@ void gemm_gpu_o0(float* A, float* B, float* C, int M, int N, int K)
 
 // The scafolding for optimized GEMM implementations
 __global__ void gemm_gpu_o1_kernel(float* A, float* B, float *C, int M, int N, int K) {
+	int row = blockIdx.y * blockDim.y + threadIdx.y;
+  	int col = blockIdx.x * blockDim.x + threadIdx.x;
+	// Keep the threads within the bounds of the matrix
+    if (row < M && col < N) {
+        float sum = 0.0f;
+		// Check if the number of columns in A is equal to the number of rows in B
+        for (int k = 0; k < K; k++) {
+			// Multiply the row of A and the column of B
+            sum += A[row * K + k] * B[k * N + col];
+        }
+		// Store the result in the output matrix
+        C[row * N + col] = sum;
+    }
 }
+
 void gemm_gpu_o1(float* A, float* B, float* C, int M, int N, int K)
 {
 	// Init block and grid size
+	dim3 blockSize(BLOCK_SIZE, BLOCK_SIZE);
+	dim3 gridSize((N + BLOCK_SIZE - 1) / BLOCK_SIZE, (M + BLOCK_SIZE - 1) / BLOCK_SIZE);
+	gemm_gpu_o1_kernel<<<gridSize, blockSize>>>(A, B, C, M, N, K);
 }
 
 __global__ void gemm_gpu_o2_kernel(float* A, float* B, float *C, int M, int N, int K) {
+	// Declare the shared memory
+	__shared__ float shared_A[TILE_SIZE][TILE_SIZE];
+	__shared__ float shared_B[TILE_SIZE][TILE_SIZE];
+
+	int tx = threadIdx.x;
+    int ty = threadIdx.y;
+
+	// Calculate the row and column of the element in C for tiling
+    int row = blockIdx.y * TILE_SIZE + ty;
+    int col = blockIdx.x * TILE_SIZE + tx;
+
+	// Initialize the value of the element in C
+    float Cvalue = 0.0f;
+
+	// Loop over the tiles of the input in A and B to compute the element in C
+    for (int m = 0; m < (K + TILE_SIZE - 1) / TILE_SIZE; m++) {
+		// Load the tiles of the input in A and B to the shared memory
+        if (row < M && m * TILE_SIZE + tx < K) {
+            shared_A[ty][tx] = A[row * K + m * TILE_SIZE + tx];
+        } else {
+            shared_A[ty][tx] = 0.0f; 
+        }
+		// Load the tiles of the input in B to the shared memory
+        if (col < N && m * TILE_SIZE + ty < K) {
+            shared_B[ty][tx] = B[(m * TILE_SIZE + ty) * N + col];
+        } else {
+            shared_B[ty][tx] = 0.0f; 
+        }
+		// Synchronize the threads
+        __syncthreads();
+		// Compute the value of the element in C
+        for (int k = 0; k < TILE_SIZE; k++) {
+            Cvalue += shared_A[ty][k] * shared_B[k][tx];
+        }
+		// Synchronize the threads
+        __syncthreads();
+    }
+	// Store the value of the element in C if it is within the boundary
+    if (row < M && col < N) {
+        C[row * N + col] = Cvalue;
+    }
 }
+
 void gemm_gpu_o2(float* A, float* B, float* C, int M, int N, int K)
 {
 	// Init block and grid size
+	dim3 blockSize(TILE_SIZE, TILE_SIZE);
+    dim3 gridSize((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE);
+    gemm_gpu_o2_kernel<<<gridSize, blockSize>>>(A, B, C, M, N, K);
 }
 
 __global__ void gemm_gpu_o3_kernel(float* A, float* B, float *C, int M, int N, int K) {
+	// Declare the shared memory
+	__shared__ float shared_A[TILE_SIZE_BEST][TILE_SIZE_BEST];
+	__shared__ float shared_B[TILE_SIZE_BEST][TILE_SIZE_BEST];
+
+	int tx = threadIdx.x;
+    int ty = threadIdx.y;
+
+	// Calculate the row and column of the element in C
+    int row = blockIdx.y * TILE_SIZE_BEST + ty;
+    int col = blockIdx.x * TILE_SIZE_BEST + tx;
+
+	// Initialize the value of the element in C
+    float Cvalue = 0.0f;
+
+	// Loop over the tiles of the input in A and B to compute the element in C
+    for (int m = 0; m < (K + TILE_SIZE_BEST - 1) / TILE_SIZE_BEST; m++) {
+		// Load the tiles of the input in A and B to the shared memory
+        if (row < M && m * TILE_SIZE_BEST + tx < K) {
+            shared_A[ty][tx] = A[row * K + m * TILE_SIZE_BEST + tx];
+        } else {
+            shared_A[ty][tx] = 0.0f; 
+        }
+		// Load the tiles of the input in B to the shared memory
+        if (col < N && m * TILE_SIZE_BEST + ty < K) {
+            shared_B[ty][tx] = B[(m * TILE_SIZE_BEST + ty) * N + col];
+        } else {
+            shared_B[ty][tx] = 0.0f; 
+        }
+		// Synchronize the threads
+        __syncthreads();
+		// Compute the value of the element in C
+        for (int k = 0; k < TILE_SIZE_BEST; k++) {
+            Cvalue += shared_A[ty][k] * shared_B[k][tx];
+        }
+		// Synchronize the threads
+        __syncthreads();
+    }
+	// Store the value of the element in C if it is within the boundary
+    if (row < M && col < N) {
+        C[row * N + col] = Cvalue;
+    }
 }
+
 void gemm_gpu_o3(float* A, float* B, float* C, int M, int N, int K)
 {
 	// Init block and grid size
+	dim3 blockSize(TILE_SIZE_BEST, TILE_SIZE_BEST);
+    dim3 gridSize((N + TILE_SIZE_BEST - 1) / TILE_SIZE_BEST, (M + TILE_SIZE_BEST - 1) / TILE_SIZE_BEST);
+    gemm_gpu_o3_kernel<<<gridSize, blockSize>>>(A, B, C, M, N, K);
 }
 
+void gemm_cublas(float* A, float* B, float* C, int M, int N, int K) {
+	// Create a cuBLAS handle
+	cublasHandle_t handle;
+	cublasCreate(&handle);
+	// Define scalars for matrix multiplication 
+	const float alpha = 1.0f;
+	const float beta = 0.0f;
+	// Perform matrix multiplication using cuBLAS
+	cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, &alpha, B, N, A, K, &beta, C, N);
+	// Destroy the cuBLAS handle
+	cublasDestroy(handle);
+}
 
 
 int main(int argc, char* argv[]) {
@@ -152,12 +275,14 @@ int main(int argc, char* argv[]) {
 	CHECK(gemm_gpu_o1)
 	CHECK(gemm_gpu_o2)
 	CHECK(gemm_gpu_o3)
+	CHECK(gemm_cublas)
 
 	// Actual run
  	TIME(gemm_gpu_o0)
 	TIME(gemm_gpu_o1)
 	TIME(gemm_gpu_o2)
 	TIME(gemm_gpu_o3)
+	TIME(gemm_cublas)
 
 	cudaFreeHost(A);
 	cudaFreeHost(B);

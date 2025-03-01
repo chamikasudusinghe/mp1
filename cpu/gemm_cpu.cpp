@@ -2,6 +2,7 @@
 #include "../include/utils.h"
 
 #define NUM_RUNS 2
+#define TILE_SIZE 64
 
 #define CHECK(name) \
   std::cout << "checking " << #name << std::endl;		\
@@ -36,7 +37,7 @@ void gemm_cpu_o0(float* A, float* B, float *C, int M, int N, int K) {
   for (int j = 0; j < N; j++) {
     for (int i = 0; i < M; i++) {
       for (int k = 0; k < K; k++) {
-	C[i * N + j]  += A[i * K + k]  * B[k * N + j];
+	      C[i * N + j]  += A[i * K + k]  * B[k * N + j];
       }
     }
   }
@@ -45,15 +46,59 @@ void gemm_cpu_o0(float* A, float* B, float *C, int M, int N, int K) {
 // Your optimized implementations go here
 // note that for o4 you don't have to change the code, but just the compiler flags. So, you can use o3's code for that part
 void gemm_cpu_o1(float* A, float* B, float *C, int M, int N, int K) {
-
+	for (int i = 0; i < M; i++) {
+    // Reorder (j,k) -> (k,j) to improve cache reuse
+    for (int k = 0; k < K; k++) {
+      // Store A_ik to reduce memory accesses
+      float A_ik = A[i * K + k]; 
+      for (int j = 0; j < N; j++) {
+        C[i * N + j] += A_ik * B[k * N + j];
+      }
+    }
+  }
 }
 
 void gemm_cpu_o2(float* A, float* B, float *C, int M, int N, int K) {
-
+  // Tile j and k for better cache locality
+  for (int jj = 0; jj < N; jj += TILE_SIZE) {
+    for (int kk = 0; kk < K; kk += TILE_SIZE) {
+      for (int i = 0; i < M; i++) {
+        // Store bounds minK and minN to reduce memory accesses
+        int minK = std::min(kk + TILE_SIZE, K);
+        int minN = std::min(jj + TILE_SIZE, N);
+        for (int k = kk; k < minK; k++) {
+          // Store A_ik to reduce memory accesses
+          float A_ik = A[i * K + k];
+          for (int j = jj; j < minN; j++) {
+            C[i * N + j] += A_ik * B[k * N + j];
+          }
+        }
+      }
+    }
+  }
 }
 
-void gemm_cpu_o3(float* A, float* B, float *C, int M, int N, int K) {
-
+void gemm_cpu_o3(float* A, float* B, float* C, int M, int N, int K) {
+  // Parallelize the outer two loops
+  // Tile j and k for better cache locality
+  #pragma omp parallel for collapse(2)
+  for (int jj = 0; jj < N; jj += TILE_SIZE) {
+    for (int kk = 0; kk < K; kk += TILE_SIZE) {
+      for (int i = 0; i < M; i++) {
+        // Store bounds minK and minN to reduce memory accesses
+        int minK = std::min(kk + TILE_SIZE, K);
+        int minN = std::min(jj + TILE_SIZE, N);
+        for (int k = kk; k < minK; k++) {
+          float A_ik = A[i * K + k];
+          // Vectorize the inner loop
+          #pragma omp simd
+          for (int j = jj; j < minN; j++) {
+            C[i * N + j] += A_ik * B[k * N + j];
+          }
+        }
+      }
+    }
+  }
 }
 
 
@@ -87,9 +132,9 @@ int main(int argc, char* argv[]) {
 	CHECK(gemm_cpu_o3)
 	delete[] refC;
 	
-	TIME(gemm_cpu_o0)
-	TIME(gemm_cpu_o1)
-	TIME(gemm_cpu_o2)
+	//TIME(gemm_cpu_o0)
+	//TIME(gemm_cpu_o1)
+	//TIME(gemm_cpu_o2)
 	TIME(gemm_cpu_o3)
 
 	delete[] A;
